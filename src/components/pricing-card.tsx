@@ -13,51 +13,126 @@ import {
 import { User } from "@supabase/supabase-js";
 import { Check } from "lucide-react";
 
+interface PricingCardProps {
+  item: {
+    id: string;
+    name: string;
+    description?: string;
+    prices?: Array<{
+      id: string;
+      amount: number;
+      currency: string;
+      formattedAmount: string;
+      displayAmount: string;
+    }>;
+  };
+  user: User | null;
+}
+
 export default function PricingCard({
   item,
   user,
-}: {
-  item: any;
-  user: User | null;
-}) {
+}: PricingCardProps) {
   // Handle checkout process
   const handleCheckout = async (priceId: string) => {
+    console.log('Starting checkout process...');
+    
     if (!user) {
-      // Redirect to login if user is not authenticated
+      console.log('No user found, redirecting to sign-in');
       window.location.href = "/sign-in";
       return;
     }
 
+    if (!priceId) {
+      console.error('No price ID provided');
+      alert('Invalid price ID. Please try again.');
+      return;
+    }
+
     try {
-      const { data, error } = await supabase.functions.invoke(
-        "supabase-functions-create-checkout",
-        {
-          body: {
-            productPriceId: priceId,
-            successUrl: `${window.location.origin}/dashboard`,
-            customerEmail: user.email || "",
-            metadata: {
-              user_id: user.id,
-            },
-          },
-          headers: {
-            "X-Customer-Email": user.email || "",
-          },
+      console.log('Creating checkout with price ID:', priceId);
+      console.log('User email:', user.email);
+      
+      // Prepare the request body according to the new Edge Function's expected format
+      // Use the Polar product ID from the item data
+      const polarProductId = item.id;
+      const polarPriceId = item.prices?.[0]?.id;
+      
+      console.log('Creating checkout with product ID:', polarProductId);
+      console.log('Using price ID:', polarPriceId);
+      
+      const requestBody = {
+        productPriceId: polarProductId, // Use the Polar product ID
+        successUrl: `${window.location.origin}/dashboard`,
+        customerEmail: user.email || "",
+        metadata: {
+          user_id: user.id,
+          source: 'web_checkout',
+          timestamp: new Date().toISOString(),
+          price_id: polarPriceId // Store the price ID for reference
         },
+      };
+
+      console.log('Request payload:', JSON.stringify(requestBody, null, 2));
+
+      console.log('Sending request to create-checkout-robust Edge Function...');
+      const { data, error } = await supabase.functions.invoke(
+        "create-checkout-robust",
+        {
+          method: 'POST',
+          body: requestBody, // No need to stringify, the invoke method does it automatically
+          headers: {
+            "Content-Type": "application/json",
+            "x-customer-email": user.email || ""
+            // No need for explicit Authorization header as it's automatically included by the Supabase client
+          },
+        }
       );
 
+      console.log('Edge Function response:', { data, error });
+
       if (error) {
+        console.error('Error from Edge Function:', error);
         throw error;
       }
 
-      // Redirect to Stripe checkout
-      if (data?.url) {
-        window.location.href = data.url;
+      // Check if we got a valid response with a checkout URL
+      if (data?.checkoutUrl) {
+        console.log('Redirecting to checkout URL:', data.checkoutUrl);
+        window.location.href = data.checkoutUrl;
       } else {
-        throw new Error("No checkout URL returned");
+        console.error('No checkout URL returned in response:', data);
+        throw new Error("No checkout URL returned in the response");
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating checkout session:", error);
+      
+      // Extract error details from the response if available
+      let errorMessage = 'Failed to start checkout';
+      let errorDetails = '';
+      
+      if (error?.message) {
+        errorMessage = error.message;
+      }
+      
+      // Check if we have a structured error response from the Edge Function
+      if (error?.error) {
+        const responseError = error.error;
+        if (typeof responseError === 'object') {
+          if (responseError.error) errorMessage = responseError.error;
+          if (responseError.details) errorDetails = responseError.details;
+        } else if (typeof responseError === 'string') {
+          errorDetails = responseError;
+        }
+      }
+      
+      // Show a user-friendly error message
+      const fullErrorMessage = errorDetails 
+        ? `${errorMessage}: ${errorDetails}` 
+        : `${errorMessage}. Please try again later.`;
+      
+      console.error('Formatted error message:', fullErrorMessage);
+      alert(fullErrorMessage);
     }
   };
 
